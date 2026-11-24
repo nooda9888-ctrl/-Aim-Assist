@@ -1,0 +1,1112 @@
+--========================================================
+-- NEXUS COMPACT MOBILE UI (Aim Assist + ESP)
+-- Mobile-first, lightweight Roblox LocalScript
+-- Location: StarterPlayer > StarterPlayerScripts
+--========================================================
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+	return
+end
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--========================================================
+-- DUPLICATE CLEANUP
+--========================================================
+
+local GUI_NAME = "NexusCompactUI"
+local ESP_NAME = "NexusESP"
+
+local existingGui = PlayerGui:FindFirstChild(GUI_NAME)
+if existingGui then
+	existingGui:Destroy()
+end
+
+local existingEsp = workspace:FindFirstChild(ESP_NAME)
+if existingEsp then
+	existingEsp:Destroy()
+end
+
+--========================================================
+-- CONFIGURATION & THEME
+--========================================================
+
+local Config = {
+	AimAssist = false,
+	FOV = 180,
+	AimSpeed = 25,
+	AimPart = "Head",
+
+	ESP = false,
+	NameESP = false,
+	ESPDistance = 500,
+}
+
+local Theme = {
+	Bg = Color3.fromRGB(13, 17, 23),
+	Surface = Color3.fromRGB(20, 26, 35),
+	Card = Color3.fromRGB(27, 35, 47),
+	Border = Color3.fromRGB(45, 62, 82),
+	Accent = Color3.fromRGB(14, 165, 233),
+	AccentBright = Color3.fromRGB(56, 189, 248),
+	Active = Color3.fromRGB(16, 185, 129),
+	Text = Color3.fromRGB(240, 246, 252),
+	Subtext = Color3.fromRGB(148, 163, 184),
+	Danger = Color3.fromRGB(239, 68, 68),
+}
+
+local AIM_PARTS = { "Head", "UpperTorso", "Torso", "HumanoidRootPart" }
+
+--========================================================
+-- CONNECTION TRACKING
+--========================================================
+
+local Connections = {}
+local PlayerConnections = {}
+local ESPObjects = {}
+local CurrentTarget = nil
+
+local function track(conn)
+	table.insert(Connections, conn)
+	return conn
+end
+
+local function trackPlayer(player, conn)
+	if not PlayerConnections[player] then
+		PlayerConnections[player] = {}
+	end
+	table.insert(PlayerConnections[player], conn)
+	return conn
+end
+
+local function cleanupPlayerConns(player)
+	local list = PlayerConnections[player]
+	if not list then
+		return
+	end
+	for _, conn in ipairs(list) do
+		if conn.Connected then
+			conn:Disconnect()
+		end
+	end
+	PlayerConnections[player] = nil
+end
+
+--========================================================
+-- TEAM & CHARACTER HELPERS
+--========================================================
+
+local function IsEnemy(player)
+	if not player or player == LocalPlayer then
+		return false
+	end
+
+	if LocalPlayer.Team ~= nil
+		and player.Team ~= nil
+		and LocalPlayer.Team == player.Team then
+		return false
+	end
+
+	return true
+end
+
+local function GetAimPart(character)
+	if not character then
+		return nil
+	end
+
+	local part = character:FindFirstChild(Config.AimPart)
+	if part and part:IsA("BasePart") then
+		return part
+	end
+
+	-- Fallback between R15 UpperTorso and R6 Torso
+	if Config.AimPart == "UpperTorso" then
+		part = character:FindFirstChild("Torso")
+	elseif Config.AimPart == "Torso" then
+		part = character:FindFirstChild("UpperTorso")
+	end
+
+	if part and part:IsA("BasePart") then
+		return part
+	end
+
+	return character:FindFirstChild("HumanoidRootPart")
+		or character:FindFirstChild("Head")
+end
+
+--========================================================
+-- GUI ROOT
+--========================================================
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = GUI_NAME
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.Parent = PlayerGui
+
+--========================================================
+-- COMPACT MAIN WINDOW
+--========================================================
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(258, 294)
+Main.Position = UDim2.fromScale(0.5, 0.5)
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.BackgroundColor3 = Theme.Bg
+Main.BorderSizePixel = 0
+Main.Visible = false
+Main.Parent = Gui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 14)
+mainCorner.Parent = Main
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Theme.Border
+mainStroke.Thickness = 1.2
+mainStroke.Parent = Main
+
+-- Auto-scale gently on very small screens
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = 1
+uiScale.Parent = Main
+
+local function updateResponsiveScale()
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	local vp = camera.ViewportSize
+	if vp.Y < 340 then
+		uiScale.Scale = math.clamp(vp.Y / 340, 0.72, 1)
+	else
+		uiScale.Scale = 1
+	end
+end
+
+updateResponsiveScale()
+if workspace.CurrentCamera then
+	track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale))
+end
+
+--========================================================
+-- HEADER (COMPACT & DRAGGABLE ON TOUCH)
+--========================================================
+
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 44)
+Header.BackgroundColor3 = Theme.Surface
+Header.BorderSizePixel = 0
+Header.Parent = Main
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 14)
+headerCorner.Parent = Header
+
+-- Flatten bottom corners of header
+local headerFix = Instance.new("Frame")
+headerFix.Position = UDim2.new(0, 0, 1, -10)
+headerFix.Size = UDim2.new(1, 0, 0, 10)
+headerFix.BackgroundColor3 = Theme.Surface
+headerFix.BorderSizePixel = 0
+headerFix.Parent = Header
+
+local AccentDot = Instance.new("Frame")
+AccentDot.Position = UDim2.fromOffset(12, 17)
+AccentDot.Size = UDim2.fromOffset(9, 9)
+AccentDot.BackgroundColor3 = Theme.AccentBright
+AccentDot.BorderSizePixel = 0
+AccentDot.Parent = Header
+
+local dotCorner = Instance.new("UICorner")
+dotCorner.CornerRadius = UDim.new(1, 0)
+dotCorner.Parent = AccentDot
+
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.fromOffset(27, 6)
+Title.Size = UDim2.new(1, -104, 0, 18)
+Title.Text = "NEXUS"
+Title.TextColor3 = Theme.Text
+Title.TextSize = 14
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local Subtitle = Instance.new("TextLabel")
+Subtitle.BackgroundTransparency = 1
+Subtitle.Position = UDim2.fromOffset(27, 23)
+Subtitle.Size = UDim2.new(1, -104, 0, 14)
+Subtitle.Text = "MOBILE • STANDBY"
+Subtitle.TextColor3 = Theme.AccentBright
+Subtitle.TextSize = 9
+Subtitle.Font = Enum.Font.GothamBold
+Subtitle.TextXAlignment = Enum.TextXAlignment.Left
+Subtitle.Parent = Header
+
+local SettingsButton = Instance.new("TextButton")
+SettingsButton.Name = "Settings"
+SettingsButton.Size = UDim2.fromOffset(32, 32)
+SettingsButton.Position = UDim2.new(1, -72, 0.5, -16)
+SettingsButton.Text = "⚙"
+SettingsButton.TextSize = 16
+SettingsButton.Font = Enum.Font.GothamBold
+SettingsButton.TextColor3 = Theme.Subtext
+SettingsButton.BackgroundColor3 = Theme.Card
+SettingsButton.AutoButtonColor = true
+SettingsButton.Parent = Header
+
+local settingsCorner = Instance.new("UICorner")
+settingsCorner.CornerRadius = UDim.new(0, 8)
+settingsCorner.Parent = SettingsButton
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Name = "Close"
+CloseButton.Size = UDim2.fromOffset(32, 32)
+CloseButton.Position = UDim2.new(1, -36, 0.5, -16)
+CloseButton.Text = "×"
+CloseButton.TextSize = 20
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.TextColor3 = Theme.Text
+CloseButton.BackgroundColor3 = Theme.Card
+CloseButton.AutoButtonColor = true
+CloseButton.Parent = Header
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.Parent = CloseButton
+
+--========================================================
+-- COMPACT TAB BAR
+--========================================================
+
+local Tabs = Instance.new("Frame")
+Tabs.Position = UDim2.fromOffset(10, 52)
+Tabs.Size = UDim2.new(1, -20, 0, 34)
+Tabs.BackgroundColor3 = Theme.Surface
+Tabs.BorderSizePixel = 0
+Tabs.Parent = Main
+
+local tabsCorner = Instance.new("UICorner")
+tabsCorner.CornerRadius = UDim.new(0, 9)
+tabsCorner.Parent = Tabs
+
+local AimTab = Instance.new("TextButton")
+AimTab.Position = UDim2.fromOffset(3, 3)
+AimTab.Size = UDim2.new(0.5, -5, 1, -6)
+AimTab.BackgroundColor3 = Theme.Accent
+AimTab.Text = "AIM"
+AimTab.TextColor3 = Theme.Text
+AimTab.TextSize = 11
+AimTab.Font = Enum.Font.GothamBold
+AimTab.AutoButtonColor = true
+AimTab.Parent = Tabs
+
+local aimTabCorner = Instance.new("UICorner")
+aimTabCorner.CornerRadius = UDim.new(0, 7)
+aimTabCorner.Parent = AimTab
+
+local ESPTab = Instance.new("TextButton")
+ESPTab.Position = UDim2.new(0.5, 2, 0, 3)
+ESPTab.Size = UDim2.new(0.5, -5, 1, -6)
+ESPTab.BackgroundColor3 = Theme.Surface
+ESPTab.Text = "ESP"
+ESPTab.TextColor3 = Theme.Subtext
+ESPTab.TextSize = 11
+ESPTab.Font = Enum.Font.GothamBold
+ESPTab.AutoButtonColor = true
+ESPTab.Parent = Tabs
+
+local espTabCorner = Instance.new("UICorner")
+espTabCorner.CornerRadius = UDim.new(0, 7)
+espTabCorner.Parent = ESPTab
+
+--========================================================
+-- SCROLLABLE PAGES
+--========================================================
+
+local function createPage()
+	local page = Instance.new("ScrollingFrame")
+	page.Position = UDim2.fromOffset(10, 94)
+	page.Size = UDim2.new(1, -20, 1, -104)
+	page.BackgroundTransparency = 1
+	page.BorderSizePixel = 0
+	page.ScrollBarThickness = 2
+	page.ScrollBarImageColor3 = Theme.Accent
+	page.CanvasSize = UDim2.new(0, 0, 0, 0)
+	page.ScrollingDirection = Enum.ScrollingDirection.Y
+	page.Parent = Main
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 8)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = page
+
+	track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 8)
+	end))
+
+	return page
+end
+
+local AimPage = createPage()
+local ESPPage = createPage()
+local SettingsPage = createPage()
+ESPPage.Visible = false
+SettingsPage.Visible = false
+
+--========================================================
+-- MOBILE UI HELPERS
+--========================================================
+
+local function updateStatusText()
+	local active = {}
+	if Config.AimAssist then
+		table.insert(active, "AIM")
+	end
+	if Config.ESP or Config.NameESP then
+		table.insert(active, "ESP")
+	end
+
+	if #active > 0 then
+		Subtitle.Text = "ACTIVE • " .. table.concat(active, " + ")
+		AccentDot.BackgroundColor3 = Theme.Active
+	else
+		Subtitle.Text = "MOBILE • STANDBY"
+		AccentDot.BackgroundColor3 = Theme.AccentBright
+	end
+end
+
+local function createToggleButton(parent, title, initialState, onToggle)
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, -2, 0, 40)
+	button.BackgroundColor3 = Theme.Card
+	button.Text = ""
+	button.AutoButtonColor = true
+	button.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 9)
+	corner.Parent = button
+
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Position = UDim2.fromOffset(12, 0)
+	label.Size = UDim2.new(1, -68, 1, 0)
+	label.Text = title
+	label.TextColor3 = Theme.Text
+	label.TextSize = 11
+	label.Font = Enum.Font.GothamBold
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = button
+
+	local badge = Instance.new("TextLabel")
+	badge.AnchorPoint = Vector2.new(1, 0.5)
+	badge.Position = UDim2.new(1, -10, 0.5, 0)
+	badge.Size = UDim2.fromOffset(44, 22)
+	badge.TextSize = 10
+	badge.Font = Enum.Font.GothamBold
+	badge.BorderSizePixel = 0
+	badge.Parent = button
+
+	local badgeCorner = Instance.new("UICorner")
+	badgeCorner.CornerRadius = UDim.new(0, 6)
+	badgeCorner.Parent = badge
+
+	local state = initialState
+
+	local function refresh()
+		badge.Text = state and "ON" or "OFF"
+		badge.BackgroundColor3 = state and Theme.Active or Theme.Surface
+		badge.TextColor3 = state and Theme.Bg or Theme.Subtext
+	end
+
+	button.Activated:Connect(function()
+		state = not state
+		refresh()
+		onToggle(state)
+		updateStatusText()
+	end)
+
+	refresh()
+	return button, function(newState)
+		state = newState
+		refresh()
+		onToggle(state)
+		updateStatusText()
+	end
+end
+
+local function createActionButton(parent, text, bgColor, onClick)
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, -2, 0, 40)
+	button.BackgroundColor3 = bgColor or Theme.Card
+	button.Text = text
+	button.TextColor3 = Theme.Text
+	button.TextSize = 11
+	button.Font = Enum.Font.GothamBold
+	button.AutoButtonColor = true
+	button.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 9)
+	corner.Parent = button
+
+	button.Activated:Connect(onClick)
+	return button
+end
+
+local function createTouchSlider(parent, title, minValue, maxValue, initialValue, onChange)
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.new(1, -2, 0, 52)
+	holder.BackgroundColor3 = Theme.Card
+	holder.BorderSizePixel = 0
+	holder.Parent = parent
+
+	local holderCorner = Instance.new("UICorner")
+	holderCorner.CornerRadius = UDim.new(0, 9)
+	holderCorner.Parent = holder
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Position = UDim2.fromOffset(12, 5)
+	titleLabel.Size = UDim2.new(0.6, 0, 0, 16)
+	titleLabel.Text = title
+	titleLabel.TextColor3 = Theme.Subtext
+	titleLabel.TextSize = 10
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Parent = holder
+
+	local valueLabel = Instance.new("TextLabel")
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.Position = UDim2.new(0.6, 0, 0, 5)
+	valueLabel.Size = UDim2.new(0.4, -12, 0, 16)
+	valueLabel.TextColor3 = Theme.AccentBright
+	valueLabel.TextSize = 11
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+	valueLabel.Parent = holder
+
+	-- Touch-friendly 30px hitbox
+	local hitbox = Instance.new("TextButton")
+	hitbox.Position = UDim2.new(0, 12, 0, 21)
+	hitbox.Size = UDim2.new(1, -24, 0, 28)
+	hitbox.BackgroundTransparency = 1
+	hitbox.Text = ""
+	hitbox.AutoButtonColor = false
+	hitbox.Parent = holder
+
+	local trackBar = Instance.new("Frame")
+	trackBar.Position = UDim2.new(0, 0, 0.5, -3)
+	trackBar.Size = UDim2.new(1, 0, 0, 6)
+	trackBar.BackgroundColor3 = Theme.Surface
+	trackBar.BorderSizePixel = 0
+	trackBar.Parent = hitbox
+
+	local trackCorner = Instance.new("UICorner")
+	trackCorner.CornerRadius = UDim.new(1, 0)
+	trackCorner.Parent = trackBar
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.fromScale(0, 1)
+	fill.BackgroundColor3 = Theme.Accent
+	fill.BorderSizePixel = 0
+	fill.Parent = trackBar
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent = fill
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(15, 15)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Position = UDim2.fromScale(0, 0.5)
+	knob.BackgroundColor3 = Theme.Text
+	knob.BorderSizePixel = 0
+	knob.Parent = trackBar
+
+	local knobCorner = Instance.new("UICorner")
+	knobCorner.CornerRadius = UDim.new(1, 0)
+	knobCorner.Parent = knob
+
+	local activeInput = nil
+
+	local function setValue(v)
+		local rounded = math.clamp(math.round(v), minValue, maxValue)
+		local pct = (rounded - minValue) / math.max(1, maxValue - minValue)
+
+		fill.Size = UDim2.fromScale(pct, 1)
+		knob.Position = UDim2.fromScale(pct, 0.5)
+		valueLabel.Text = tostring(rounded)
+		onChange(rounded)
+	end
+
+	local function applyInput(input)
+		local w = trackBar.AbsoluteSize.X
+		if w <= 0 then
+			return
+		end
+		local pct = math.clamp((input.Position.X - trackBar.AbsolutePosition.X) / w, 0, 1)
+		setValue(minValue + (maxValue - minValue) * pct)
+	end
+
+	hitbox.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch
+			or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			activeInput = input
+			applyInput(input)
+		end
+	end)
+
+	track(UserInputService.InputChanged:Connect(function(input)
+		if not activeInput then
+			return
+		end
+		if input == activeInput
+			or (activeInput.UserInputType == Enum.UserInputType.MouseButton1
+				and input.UserInputType == Enum.UserInputType.MouseMovement) then
+			applyInput(input)
+		end
+	end))
+
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input == activeInput then
+			activeInput = nil
+		end
+	end))
+
+	setValue(initialValue)
+	return setValue
+end
+
+--========================================================
+-- TAB SWITCHING
+--========================================================
+
+local function ShowPage(page)
+	AimPage.Visible = page == AimPage
+	ESPPage.Visible = page == ESPPage
+	SettingsPage.Visible = page == SettingsPage
+
+	AimTab.BackgroundColor3 = page == AimPage and Theme.Accent or Theme.Surface
+	AimTab.TextColor3 = page == AimPage and Theme.Text or Theme.Subtext
+
+	ESPTab.BackgroundColor3 = page == ESPPage and Theme.Accent or Theme.Surface
+	ESPTab.TextColor3 = page == ESPPage and Theme.Text or Theme.Subtext
+
+	SettingsButton.TextColor3 = page == SettingsPage and Theme.AccentBright or Theme.Subtext
+end
+
+AimTab.Activated:Connect(function()
+	ShowPage(AimPage)
+end)
+
+ESPTab.Activated:Connect(function()
+	ShowPage(ESPPage)
+end)
+
+SettingsButton.Activated:Connect(function()
+	ShowPage(SettingsPage)
+end)
+
+--========================================================
+-- AIM PAGE CONTROLS
+--========================================================
+
+local _, setAimToggle = createToggleButton(AimPage, "AIM ASSIST", Config.AimAssist, function(enabled)
+	Config.AimAssist = enabled
+	if not enabled then
+		CurrentTarget = nil
+	end
+end)
+
+local setFovValue = createTouchSlider(AimPage, "FOV RADIUS", 30, 600, Config.FOV, function(v)
+	Config.FOV = v
+end)
+
+local setSpeedValue = createTouchSlider(AimPage, "AIM SPEED", 1, 100, Config.AimSpeed, function(v)
+	Config.AimSpeed = v
+end)
+
+local partIndex = 1
+local PartButton
+PartButton = createActionButton(AimPage, "AIM PART  •  HEAD", Theme.Card, function()
+	partIndex = (partIndex % #AIM_PARTS) + 1
+	Config.AimPart = AIM_PARTS[partIndex]
+	CurrentTarget = nil
+	PartButton.Text = "AIM PART  •  " .. string.upper(Config.AimPart)
+end)
+
+--========================================================
+-- ESP SYSTEM
+--========================================================
+
+local ESPFolder = Instance.new("Folder")
+ESPFolder.Name = ESP_NAME
+ESPFolder.Parent = workspace
+
+local function RemoveESP(player)
+	local data = ESPObjects[player]
+	if not data then
+		return
+	end
+
+	if data.Highlight then
+		data.Highlight:Destroy()
+	end
+	if data.NameTag then
+		data.NameTag:Destroy()
+	end
+
+	ESPObjects[player] = nil
+end
+
+local function SyncPlayerESP(player)
+	if not player or player == LocalPlayer then
+		return
+	end
+
+	if (not Config.ESP and not Config.NameESP) or not IsEnemy(player) then
+		RemoveESP(player)
+		return
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local head = character and (character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart"))
+
+	if not character or not humanoid or humanoid.Health <= 0 or not head then
+		RemoveESP(player)
+		return
+	end
+
+	local data = ESPObjects[player]
+	if data and data.Character ~= character then
+		RemoveESP(player)
+		data = nil
+	end
+
+	if not data then
+		data = { Character = character }
+		ESPObjects[player] = data
+	end
+
+	-- Highlight ESP
+	if Config.ESP and not data.Highlight then
+		local highlight = Instance.new("Highlight")
+		highlight.Name = "PlayerESP"
+		highlight.Adornee = character
+		highlight.FillColor = Theme.Accent
+		highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+		highlight.FillTransparency = 0.65
+		highlight.OutlineTransparency = 0
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.Parent = ESPFolder
+		data.Highlight = highlight
+	elseif not Config.ESP and data.Highlight then
+		data.Highlight:Destroy()
+		data.Highlight = nil
+	end
+
+	-- Name ESP
+	if Config.NameESP and not data.NameTag then
+		local tag = Instance.new("BillboardGui")
+		tag.Name = "NameESP"
+		tag.Adornee = head
+		tag.Size = UDim2.fromOffset(180, 32)
+		tag.StudsOffset = Vector3.new(0, 3, 0)
+		tag.AlwaysOnTop = true
+		tag.MaxDistance = Config.ESPDistance
+		tag.Parent = ESPFolder
+
+		local label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Size = UDim2.fromScale(1, 1)
+		label.Text = player.DisplayName
+		label.TextColor3 = Theme.Text
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.TextStrokeTransparency = 0.2
+		label.TextSize = 13
+		label.Font = Enum.Font.GothamBold
+		label.Parent = tag
+
+		data.NameTag = tag
+	elseif not Config.NameESP and data.NameTag then
+		data.NameTag:Destroy()
+		data.NameTag = nil
+	end
+
+	if data.NameTag then
+		data.NameTag.Adornee = head
+		data.NameTag.MaxDistance = Config.ESPDistance
+	end
+end
+
+local function UpdateESP()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			SyncPlayerESP(player)
+		end
+	end
+end
+
+--========================================================
+-- ESP PAGE CONTROLS
+--========================================================
+
+local _, setEspToggle = createToggleButton(ESPPage, "PLAYER ESP", Config.ESP, function(enabled)
+	Config.ESP = enabled
+	UpdateESP()
+end)
+
+local _, setNameToggle = createToggleButton(ESPPage, "NAME ESP", Config.NameESP, function(enabled)
+	Config.NameESP = enabled
+	UpdateESP()
+end)
+
+--========================================================
+-- SETTINGS PAGE
+--========================================================
+
+local SettingsCard = Instance.new("TextLabel")
+SettingsCard.Size = UDim2.new(1, -2, 0, 74)
+SettingsCard.BackgroundColor3 = Theme.Card
+SettingsCard.Text = "NEXUS COMPACT\nAim Assist + ESP\nOptimized for Mobile Touch"
+SettingsCard.TextColor3 = Theme.Subtext
+SettingsCard.TextSize = 11
+SettingsCard.Font = Enum.Font.Gotham
+SettingsCard.TextWrapped = true
+SettingsCard.Parent = SettingsPage
+
+local cardCorner = Instance.new("UICorner")
+cardCorner.CornerRadius = UDim.new(0, 9)
+cardCorner.Parent = SettingsCard
+
+createActionButton(SettingsPage, "RESET ALL", Theme.Danger, function()
+	setAimToggle(false)
+	setFovValue(180)
+	setSpeedValue(25)
+	partIndex = 1
+	Config.AimPart = AIM_PARTS[1]
+	PartButton.Text = "AIM PART  •  HEAD"
+	setEspToggle(false)
+	setNameToggle(false)
+	CurrentTarget = nil
+end)
+
+--========================================================
+-- FOV CIRCLE (SCREEN CENTER FOR MOBILE)
+--========================================================
+
+local FOVCircle = Instance.new("Frame")
+FOVCircle.Name = "FOVCircle"
+FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircle.BackgroundTransparency = 1
+FOVCircle.Visible = false
+FOVCircle.ZIndex = 10
+FOVCircle.Parent = Gui
+
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(1, 0)
+fovCorner.Parent = FOVCircle
+
+local FOVStroke = Instance.new("UIStroke")
+FOVStroke.Color = Theme.AccentBright
+FOVStroke.Thickness = 1.8
+FOVStroke.Parent = FOVCircle
+
+--========================================================
+-- TARGETING & AIM LOOP (CENTER-SCREEN MOBILE READY)
+--========================================================
+
+local function FindTarget(camera, center)
+	local closest = nil
+	local closestDistance = Config.FOV
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if IsEnemy(player) then
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local part = GetAimPart(character)
+
+			if humanoid and humanoid.Health > 0 and part then
+				local screen, visible = camera:WorldToViewportPoint(part.Position)
+				if visible and screen.Z > 0 then
+					local distance = (Vector2.new(screen.X, screen.Y) - center).Magnitude
+					if distance < closestDistance then
+						closestDistance = distance
+						closest = part
+					end
+				end
+			end
+		end
+	end
+
+	return closest
+end
+
+track(RunService.RenderStepped:Connect(function(dt)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		FOVCircle.Visible = false
+		return
+	end
+
+	local center = Vector2.new(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
+	FOVCircle.Position = UDim2.fromOffset(center.X, center.Y)
+	FOVCircle.Size = UDim2.fromOffset(Config.FOV * 2, Config.FOV * 2)
+	FOVCircle.Visible = Config.AimAssist
+
+	if not Config.AimAssist then
+		CurrentTarget = nil
+		return
+	end
+
+	if CurrentTarget then
+		local character = CurrentTarget.Parent
+		local player = character and Players:GetPlayerFromCharacter(character)
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+		if not CurrentTarget:IsDescendantOf(workspace)
+			or not player
+			or not IsEnemy(player)
+			or not humanoid
+			or humanoid.Health <= 0 then
+			CurrentTarget = nil
+		else
+			local screen, visible = camera:WorldToViewportPoint(CurrentTarget.Position)
+			if not visible or screen.Z <= 0
+				or (Vector2.new(screen.X, screen.Y) - center).Magnitude > Config.FOV then
+				CurrentTarget = nil
+			end
+		end
+	end
+
+	if not CurrentTarget then
+		CurrentTarget = FindTarget(camera, center)
+	end
+
+	if not CurrentTarget then
+		return
+	end
+
+	local desired = CFrame.lookAt(camera.CFrame.Position, CurrentTarget.Position)
+	local alpha = 1 - math.exp(-Config.AimSpeed * dt)
+	camera.CFrame = camera.CFrame:Lerp(desired, alpha)
+end))
+
+-- Lightweight ESP sync loop (every 0.2s)
+local espTimer = 0
+track(RunService.Heartbeat:Connect(function(dt)
+	espTimer += dt
+	if espTimer < 0.2 then
+		return
+	end
+	espTimer = 0
+	UpdateESP()
+end))
+
+--========================================================
+-- PLAYER LIFECYCLE
+--========================================================
+
+local function SetupPlayer(player)
+	if player == LocalPlayer then
+		return
+	end
+
+	trackPlayer(player, player.CharacterAdded:Connect(function()
+		RemoveESP(player)
+	end))
+
+	trackPlayer(player, player.CharacterRemoving:Connect(function(character)
+		RemoveESP(player)
+		if CurrentTarget and CurrentTarget:IsDescendantOf(character) then
+			CurrentTarget = nil
+		end
+	end))
+
+	trackPlayer(player, player:GetPropertyChangedSignal("Team"):Connect(function()
+		if not IsEnemy(player) then
+			RemoveESP(player)
+			if CurrentTarget and player.Character and CurrentTarget:IsDescendantOf(player.Character) then
+				CurrentTarget = nil
+			end
+		end
+	end))
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	SetupPlayer(player)
+end
+
+track(Players.PlayerAdded:Connect(SetupPlayer))
+
+track(Players.PlayerRemoving:Connect(function(player)
+	RemoveESP(player)
+	cleanupPlayerConns(player)
+	if CurrentTarget and player.Character and CurrentTarget:IsDescendantOf(player.Character) then
+		CurrentTarget = nil
+	end
+end))
+
+--========================================================
+-- TOUCH-FRIENDLY WINDOW DRAG
+--========================================================
+
+local dragInput = nil
+local dragStart = nil
+local startPos = nil
+
+Header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragInput = input
+		dragStart = input.Position
+		startPos = Main.Position
+	end
+end)
+
+track(UserInputService.InputChanged:Connect(function(input)
+	if not dragInput then
+		return
+	end
+	if input == dragInput
+		or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+			and input.UserInputType == Enum.UserInputType.MouseMovement) then
+		local delta = input.Position - dragStart
+		Main.Position = UDim2.new(
+			startPos.X.Scale,
+			startPos.X.Offset + delta.X,
+			startPos.Y.Scale,
+			startPos.Y.Offset + delta.Y
+		)
+	end
+end))
+
+track(UserInputService.InputEnded:Connect(function(input)
+	if input == dragInput then
+		dragInput = nil
+	end
+end))
+
+--========================================================
+-- FLOATING TOGGLE BUTTON (DRAGGABLE + TAP TO OPEN/CLOSE)
+--========================================================
+
+local FloatingBtn = Instance.new("TextButton")
+FloatingBtn.Name = "FloatingToggle"
+FloatingBtn.Size = UDim2.fromOffset(48, 48)
+FloatingBtn.Position = UDim2.new(0, 14, 0.5, -24)
+FloatingBtn.BackgroundColor3 = Theme.Surface
+FloatingBtn.Text = "◈"
+FloatingBtn.TextColor3 = Theme.AccentBright
+FloatingBtn.TextSize = 22
+FloatingBtn.Font = Enum.Font.GothamBold
+FloatingBtn.AutoButtonColor = true
+FloatingBtn.ZIndex = 20
+FloatingBtn.Parent = Gui
+
+local floatCorner = Instance.new("UICorner")
+floatCorner.CornerRadius = UDim.new(1, 0)
+floatCorner.Parent = FloatingBtn
+
+local floatStroke = Instance.new("UIStroke")
+floatStroke.Color = Theme.Accent
+floatStroke.Thickness = 1.8
+floatStroke.Parent = FloatingBtn
+
+local function toggleWindow()
+	Main.Visible = not Main.Visible
+	FloatingBtn.BackgroundColor3 = Main.Visible and Theme.Accent or Theme.Surface
+	FloatingBtn.TextColor3 = Theme.Text
+end
+
+-- Tap opens/closes; dragging moves the floating button anywhere on screen
+local btnDragInput = nil
+local btnDragStart = nil
+local btnStartPos = nil
+local btnMoved = false
+
+FloatingBtn.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		btnDragInput = input
+		btnDragStart = input.Position
+		btnStartPos = FloatingBtn.Position
+		btnMoved = false
+	end
+end)
+
+track(UserInputService.InputChanged:Connect(function(input)
+	if not btnDragInput then
+		return
+	end
+	if input == btnDragInput
+		or (btnDragInput.UserInputType == Enum.UserInputType.MouseButton1
+			and input.UserInputType == Enum.UserInputType.MouseMovement) then
+		local delta = input.Position - btnDragStart
+		if delta.Magnitude > 8 then
+			btnMoved = true
+			FloatingBtn.Position = UDim2.new(
+				btnStartPos.X.Scale,
+				btnStartPos.X.Offset + delta.X,
+				btnStartPos.Y.Scale,
+				btnStartPos.Y.Offset + delta.Y
+			)
+		end
+	end
+end))
+
+track(UserInputService.InputEnded:Connect(function(input)
+	if input == btnDragInput then
+		btnDragInput = nil
+		if not btnMoved then
+			toggleWindow()
+		end
+	end
+end))
+
+CloseButton.Activated:Connect(function()
+	Main.Visible = false
+	FloatingBtn.BackgroundColor3 = Theme.Surface
+	FloatingBtn.TextColor3 = Theme.AccentBright
+end)
+
+--========================================================
+-- CLEANUP ON DESTROY
+--========================================================
+
+Gui.Destroying:Connect(function()
+	for _, conn in ipairs(Connections) do
+		if conn.Connected then
+			conn:Disconnect()
+		end
+	end
+	table.clear(Connections)
+
+	for player in pairs(PlayerConnections) do
+		cleanupPlayerConns(player)
+	end
+
+	for player in pairs(ESPObjects) do
+		RemoveESP(player)
+	end
+
+	if ESPFolder and ESPFolder.Parent then
+		ESPFolder:Destroy()
+	end
+end)
+
+ShowPage(AimPage)
+updateStatusText()
